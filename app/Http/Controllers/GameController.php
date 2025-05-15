@@ -8,6 +8,11 @@ use App\Models\Category;
 use App\Models\Word;
 use App\Models\Definition;
 use App\Models\PlayerResult;
+use Illuminate\Support\Facades\Crypt;
+use App\Models\WordEvent;
+use Illuminate\Support\Str;
+
+
 
 class GameController extends Controller
 {
@@ -15,7 +20,6 @@ class GameController extends Controller
     {
         $categoryId = $request->query('category_id');
 
-        // Obtener palabra aleatoria de esa categoría
         $word = Word::with('definitions')
             ->where('category_id', $categoryId)
             ->inRandomOrder()
@@ -25,66 +29,80 @@ class GameController extends Controller
             return response()->json(['error' => 'No se encontró una palabra con definiciones en esta categoría.'], 404);
         }
 
-        // Definición correcta (de esa palabra)
         $correctDefinition = $word->definitions->random();
 
-        // Otras definiciones aleatorias (incorrectas)
         $incorrectDefinitions = Definition::where('word_id', '!=', $word->id)
             ->inRandomOrder()
             ->limit(3)
             ->get();
 
-        // Mezclar
-        $definitions = collect([$correctDefinition])->merge($incorrectDefinitions)->shuffle();
+        $allDefinitions = collect([$correctDefinition])->merge($incorrectDefinitions)->shuffle();
+
+        // Crear un token encriptado que el frontend enviará luego a /check-answer
+        $questionPayload = [
+            'word_id' => $word->id,
+            'valid_definition_ids' => $allDefinitions->pluck('id')->toArray(),
+            'correct_definition_id' => $correctDefinition->id,
+        ];
+
+        $questionToken = Crypt::encrypt($questionPayload); // genera el token seguro
 
         return response()->json([
             'word' => $word->word,
-            'definitions' => $definitions->map(fn($def) => [
+            'definitions' => $allDefinitions->map(fn($def) => [
                 'id' => $def->id,
                 'text' => $def->definition
-            ])->values()
+            ])->values(),
+            'question_token' => $questionToken
         ]);
     }
-
 
     public function checkAnswer(Request $request)
     {
         $validated = $request->validate([
-            'definition_id' => 'required|exists:definitions,id',
-            'word_id' => 'required|exists:words,id',
+            'definition_id' => 'required|integer',
+            'question_token' => 'required'
         ]);
     
-        $definition = Definition::find($validated['definition_id']);
-        $word = Word::find($validated['word_id']);
+        try {
+            $question = Crypt::decrypt($validated['question_token']);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Token inválido o alterado.'], 400);
+        }
     
-        $isCorrect = $definition->word_id === $word->id;
+        // Verifica que la definición esté entre las opciones válidas
+        if (!in_array($validated['definition_id'], $question['valid_definition_ids'])) {
+            return response()->json(['error' => 'La definición no pertenece a las opciones de la pregunta.'], 403);
+        }
     
-        // Guardar el resultado
+        $isCorrect = $validated['definition_id'] == $question['correct_definition_id'];
+
+        $user = auth()->user();
+        $wordId = $question['word_id'];
+        $eventId = Str::uuid();
+    
+        // Guardar resultado
         PlayerResult::create([
             'user_id' => auth()->id(),
-            'word_id' => $word->id,
-            'category_id' => $word->category_id,
+            'word_id' => $question['word_id'],
+            'category_id' => Word::find($question['word_id'])->category_id,
             'is_correct' => $isCorrect,
         ]);
+        WordEvent::create([
+            'user_id' => $user->id,
+            'word_id' => $wordId,
+            'user_name' => $user->name, 
+            'word_text' => Word::find($wordId)->word,
+            'event_id' => $eventId,
+            'event' => $isCorrect ? 'correct' : 'incorrect',
+            'event_time' => now(),
+        ]);
+
     
         return response()->json([
-            'message' => $isCorrect ? '¡Correcto!' : 'Incorrecto. Intenta de nuevo.',
-            'correct' => $isCorrect
+            'correct' => $isCorrect,
+            'message' => $isCorrect ? '¡Correcto!' : 'Incorrecto.'
         ]);
-    }
-
-    public function search(Request $request)
-    {
-        $query = $request->query('q'); // este viene del request, ej: ?q=perro
-    
-        $words = Word::where('word', 'LIKE', "%$query%")
-            ->orWhereHas('definitions', function ($q) use ($query) {
-                $q->where('definition', 'LIKE', "%$query%");
-            })
-            ->with('definitions')
-            ->get();
-    
-        return response()->json($words);
     }
 
     public function stats()
@@ -107,4 +125,20 @@ class GameController extends Controller
 
         return response()->json($summary);
     }
+
+    public function wordEvents()
+{
+    $events = WordEvent::with(['user', 'word'])->get();
+
+    return response()->json($events->map(function ($event) {
+        return [
+            'id' => $event->id,
+            'user_name' => $event->user->name ?? 'Unkown',
+            'word' => $event->word->word ?? 'Unknown',
+            'event' => $event->event,
+            'event_time' => $event->event_time,
+        ];
+    }));
+}
+
 }

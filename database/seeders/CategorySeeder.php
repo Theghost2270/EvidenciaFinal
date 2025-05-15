@@ -18,6 +18,9 @@ class CategorySeeder extends Seeder
             ['id' => 1, 'name' => 'Comida'],
             ['id' => 2, 'name' => 'Animales'],
             ['id' => 3, 'name' => 'Tecnología'],
+            ['id' => 4, 'name' => 'Deportes'],
+            ['id' => 5, 'name' => 'Profesiones'],
+            ['id' => 6, 'name' => 'Transporte'],
         ]);
     }
 }
